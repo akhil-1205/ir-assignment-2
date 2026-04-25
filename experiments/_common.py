@@ -51,6 +51,35 @@ def _load_dense(dir_path: Path, encoder: Encoder) -> DenseIndex:
     return DenseIndex.load(dir_path, encoder=encoder)
 
 
+def _train_dense_from_saved(
+    dir_path: Path, train_id_set: set[str], encoder: Encoder
+) -> DenseIndex:
+    """Load saved embeddings, subset to train IDs, build a fresh FAISS index.
+
+    Avoids re-encoding while guaranteeing the index never returns held-out IDs.
+    """
+    import faiss  # type: ignore
+
+    data = np.load(dir_path / "vectors.npz", allow_pickle=True)
+    all_ids = list(data["ids"].tolist())
+    emb_all = data["emb"]
+    field = str(data["field"][0])
+
+    keep = [i for i, eid in enumerate(all_ids) if eid in train_id_set]
+    ids = [all_ids[i] for i in keep]
+    emb = np.ascontiguousarray(emb_all[keep])
+
+    index = faiss.IndexFlatIP(emb.shape[1])
+    index.add(emb)
+    return DenseIndex(
+        index=index,
+        episode_ids=ids,
+        embeddings=emb,
+        field=field,  # type: ignore[arg-type]
+        encoder=encoder,
+    )
+
+
 def load_setup(
     episodes_path: str = DEFAULT_EPISODES,
     index_dir: str = DEFAULT_INDEX_DIR,
@@ -84,14 +113,17 @@ def load_setup(
         and (dense_plan_dir / "index.faiss").exists()
     )
 
+    train_id_set = {ep.episode_id for ep in train}
+
     if has_all and not rebuild:
-        # Indices were built over the full corpus; we restrict at query time
-        # by only allowing train ids in the metadata store. Held-out episodes
-        # will simply not be retrievable as relevant docs.
-        bm25 = BM25Index.load(bm25_path)
-        dense_state = _load_dense(dense_state_dir, encoder)
-        dense_sp = _load_dense(dense_sp_dir, encoder)
-        dense_plan = _load_dense(dense_plan_dir, encoder)
+        # Saved indices contain the full corpus. For a clean held-out
+        # evaluation we always restrict to train: rebuild BM25 from train
+        # tokens (cheap) and subset the saved dense embeddings by train
+        # IDs (no re-encoding needed).
+        bm25 = BM25Index.build(train, field="full_document")
+        dense_state = _train_dense_from_saved(dense_state_dir, train_id_set, encoder)
+        dense_sp = _train_dense_from_saved(dense_sp_dir, train_id_set, encoder)
+        dense_plan = _train_dense_from_saved(dense_plan_dir, train_id_set, encoder)
     else:
         bm25 = BM25Index.build(train, field="full_document")
         dense_state = DenseIndex.build(train, field="state", encoder=encoder)

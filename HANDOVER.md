@@ -306,7 +306,7 @@ load setup → build retrievers → call `evaluate_retriever` → write CSV + ba
 | File | What it does |
 |------|-------------|
 | **`__init__.py`** | Marker; lets `runpy.run_path` resolve module-relative imports cleanly. |
-| **`_common.py`** | The boring plumbing. Bootstraps `src/` onto `sys.path` so scripts run without `pip install -e .`. `load_setup()` returns a `Setup` dataclass holding the train/held-out split, queries, qrels, metadata store, BM25 index, three dense indices, encoder, and tool vocab. Indices are loaded from `data/index/` if present and rebuilt in-memory otherwise. Helpers: `evaluate_retriever`, `write_table`, `save_bar_plot` (matplotlib Agg backend → PNG). |
+| **`_common.py`** | The boring plumbing. Bootstraps `src/` onto `sys.path` so scripts run without `pip install -e .`. `load_setup()` returns a `Setup` dataclass holding the train/held-out split, queries, qrels, metadata store, BM25 index, three dense indices, encoder, and tool vocab. **Always restricts indices to train at eval time** — when saved indices exist, rebuilds BM25 over train tokens and subsets saved FAISS embeddings by train IDs (no re-encoding). When indices are missing, builds everything in-memory from scratch. Helpers: `evaluate_retriever`, `write_table`, `save_bar_plot` (matplotlib Agg backend → PNG). |
 | **`exp1_methods.py`** | Compares BM25, dense (state), dense (state+plan), hybrid, field-aware. Writes `results/tables/exp1_methods.csv` and `results/figures/exp1_methods_ndcg5.png`. |
 | **`exp2_representation.py`** | Holds retriever fixed (dense), varies the embedded text (state / state+plan / full_document — the last one is built ad-hoc since `state` and `state+plan` are pre-loaded). |
 | **`exp3_success_failure.py`** | Two halves. **IR side:** evaluates hybrid retrieval under three modes (`success`, `failure`, `any`) using mode-aware qrels. **Downstream side:** runs the simulated agent four ways (no retrieval / success-only / failure-only / both) and reports success rate, failure repetition, and tool-distribution KL vs. the no-retrieval baseline. |
@@ -391,12 +391,27 @@ data/
 
 ## 6. Gotchas / things to know before you change anything
 
-1. **Data leakage in retrieval evaluation.** `_common.load_setup()` loads
-   indices that were built over the *full* corpus. The split is enforced
-   on the *retrieval-side metadata store* (only train episodes are
-   resolvable). Held-out episodes simply will not appear in `qrels` as
-   relevant. If you change the split logic or the index build, audit this
-   carefully — it's easy to leak.
+1. **Held-out evaluation requires train-only indices.** This was a real
+   bug in v0 — `scripts/build_indices.py` writes indices over the **full
+   corpus**, but the retrieval-side metadata store is built from the
+   **train split only** (correct semantics: a query from the held-out
+   set should not be able to retrieve itself or other held-out
+   episodes). Loading the saved indices verbatim caused
+   `MetadataStore.get(eid) -> KeyError` when BM25 surfaced a held-out
+   ID.
+
+   **How `_common.load_setup()` handles it now:** if saved indices are
+   present, it rebuilds BM25 from the train corpus (cheap — pure Python
+   tokenization) and **subsets the saved dense embeddings by train IDs
+   to build fresh FAISS indices** — no re-encoding required. The end
+   result: every index used during evaluation contains exactly the
+   train episodes, never held-out ones. See
+   [`_common._train_dense_from_saved`](experiments/_common.py).
+
+   **If you change the split, the index build, or the metadata store,
+   re-audit this path carefully.** Symptoms of regression: `KeyError`
+   on `store.get(eid)`, or impossibly perfect IR scores (the retriever
+   pulling the query out of its own corpus).
 
 2. **Lazy imports in `retrieval/__init__.py`.** This is intentional. If you
    import retrievers directly there, modules with no IR-runtime needs

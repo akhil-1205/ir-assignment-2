@@ -1,23 +1,41 @@
 """Build queries + relevance judgments from a held-out split.
 
-Relevance rule (per plan §7.1):
-  An episode is relevant to a held-out query if
-    (a) task_type matches, AND
-    (b) outcome label is informative for the requested mode.
+Relevance grading (graded for nDCG, thresholded for P/R/MRR):
 
-We grade with a simple two-level scheme: 2 if (a) and (b), 1 if only (a),
-0 otherwise — works for nDCG and threshold-based P/R.
+    2.0  same task_type AND tool-set Jaccard >= HIGH_OVERLAP with the
+         held-out episode's gold tools  (highly relevant)
+    1.0  same task_type AND any tool overlap (> 0)                (relevant)
+    0.5  same task_type, no tool overlap                           (topical only)
+    0.0  not in qrels (different task_type)
+
+`mode` (success / failure) acts as a multiplier: episodes whose
+outcome contradicts the requested mode get their grade halved. The
+retriever's `filter_outcome` argument carries the actual filter logic.
+
+P@k / R@k / MRR use a strict threshold of 2.0 by default — same-type
+distractors no longer trivially saturate precision. nDCG uses the full
+graded scale.
 """
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from ..schema import Episode
 
 QueryMode = Literal["success", "failure", "any"]
+
+HIGH_OVERLAP = 0.5
+DEFAULT_RELEVANCE_THRESHOLD = 2.0
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 0.0
+    union = a | b
+    return len(a & b) / len(union) if union else 0.0
 
 
 @dataclass
@@ -26,7 +44,8 @@ class HeldOutQuery:
     text: str
     task_type: str
     mode: QueryMode
-    source_episode_id: str  # the held-out episode this query was derived from
+    source_episode_id: str
+    gold_tools: list[str] = field(default_factory=list)
 
 
 def split_episodes(
@@ -45,18 +64,17 @@ def build_queries(
     held_out: list[Episode],
     mode: QueryMode = "any",
 ) -> list[HeldOutQuery]:
-    queries: list[HeldOutQuery] = []
-    for ep in held_out:
-        queries.append(
-            HeldOutQuery(
-                query_id=f"q-{ep.episode_id}",
-                text=ep.state_text,
-                task_type=ep.task_type,
-                mode=mode,
-                source_episode_id=ep.episode_id,
-            )
+    return [
+        HeldOutQuery(
+            query_id=f"q-{ep.episode_id}",
+            text=ep.state_text,
+            task_type=ep.task_type,
+            mode=mode,
+            source_episode_id=ep.episode_id,
+            gold_tools=list(ep.tools_used),
         )
-    return queries
+        for ep in held_out
+    ]
 
 
 def build_qrels(
@@ -70,17 +88,22 @@ def build_qrels(
 
     qrels: dict[str, dict[str, float]] = {}
     for q in queries:
+        gold = set(q.gold_tools)
         rel: dict[str, float] = {}
         for ep in by_type.get(q.task_type, []):
-            type_match = True
-            outcome_match = (
-                q.mode == "any"
-                or (q.mode == "success" and ep.outcome_label == "success")
-                or (q.mode == "failure" and ep.outcome_label == "failure")
-            )
-            if type_match and outcome_match:
-                rel[ep.episode_id] = 2.0
-            elif type_match:
-                rel[ep.episode_id] = 1.0
+            overlap = _jaccard(gold, set(ep.tools_used))
+            if overlap >= HIGH_OVERLAP:
+                grade = 2.0
+            elif overlap > 0.0:
+                grade = 1.0
+            else:
+                grade = 0.5
+
+            if q.mode == "success" and ep.outcome_label != "success":
+                grade *= 0.5
+            elif q.mode == "failure" and ep.outcome_label != "failure":
+                grade *= 0.5
+
+            rel[ep.episode_id] = grade
         qrels[q.query_id] = rel
     return qrels

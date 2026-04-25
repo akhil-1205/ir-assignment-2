@@ -10,7 +10,12 @@
       "Bash(python -c ' *)",
       "Bash(pip install *)",
       "Bash(PYTHONPATH=src python experiments/exp1_methods.py --quick)",
-      "Bash(PYTHONPATH=src python experiments/run_all.py --quick)"
+      "Bash(PYTHONPATH=src python experiments/run_all.py --quick)",
+      "Bash(rm -rf data/processed data/index)",
+      "Bash(PYTHONPATH=src python scripts/download_datasets.py)",
+      "Bash(PYTHONPATH=src python scripts/build_indices.py)",
+      "Bash(PYTHONPATH=src python -m pytest -q)",
+      "Bash(PYTHONPATH=src python experiments/exp1_methods.py)"
     ]
   }
 }

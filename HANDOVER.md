@@ -244,8 +244,8 @@ ir-assignment-2/
 | File | What it does |
 |------|-------------|
 | **`__init__.py`** | Empty, package marker. |
-| **`ace.py`** | Tries 3 candidate HuggingFace dataset paths for ACE; adapts whatever schema it finds via best-effort field aliases (`state` / `task` / `instruction`, `plan` / `trajectory`, `tools` / `actions`, `outcome` / `result` / `label`). If nothing loads, returns a deterministic 800-episode synthetic set whose tool/task affinity is wired to make retrieval evaluation meaningful. |
-| **`msc.py`** | Same pattern for MSC: attempts `facebook/msc`, `msc`, `ParlAI/msc`, projects each session into an `Episode` (state = penultimate utterance, plan = last utterance, success = grounded persona-using response). Synthetic fallback of 400 episodes. |
+| **`ace.py`** | Tries 3 candidate HuggingFace dataset paths for ACE; adapts whatever schema it finds via best-effort field aliases (`state` / `task` / `instruction`, `plan` / `trajectory`, `tools` / `actions`, `outcome` / `result` / `label`). If nothing loads, returns a deterministic 800-episode synthetic set. The synthetic generator uses **per-task-type templates that never contain the task_type literal**, plus entity / topic / action pools and **~18% lexical distractors** (state borrowed from one task_type but tools and label from another). This is what prevents IR metrics from saturating — BM25 can no longer trivially recover task_type from a single token. |
+| **`msc.py`** | Same pattern for MSC: attempts `facebook/msc`, `msc`, `ParlAI/msc`, projects each session into an `Episode` (state = penultimate utterance, plan = last utterance, success = grounded persona-using response). Synthetic fallback of 400 episodes with the same template/distractor design as ACE. |
 
 > **Why a synthetic fallback?** ACE/MSC HuggingFace paths drift over releases.
 > Without a fallback the entire downstream pipeline would block on dataset
@@ -294,8 +294,8 @@ ir-assignment-2/
 | File | What it does |
 |------|-------------|
 | **`__init__.py`** | Re-exports the IR metric API. |
-| **`ir_metrics.py`** | From-scratch implementations of P@k, R@k, MRR, nDCG@k. `evaluate(results_by_query, qrels, k_values)` aggregates them across a query batch and returns a flat dict (`P@1`, `R@5`, `nDCG@10`, …, plus `MRR`). |
-| **`relevance.py`** | `split_episodes` (seeded train/held-out split), `HeldOutQuery` dataclass, `build_queries` (one query per held-out episode), `build_qrels` (graded relevance: 2 if same task_type AND outcome matches the requested mode, 1 if only task_type matches, 0 otherwise). |
+| **`ir_metrics.py`** | From-scratch implementations of P@k, R@k, MRR, nDCG@k. `evaluate(results_by_query, qrels, k_values, relevance_threshold=2.0)` aggregates across a query batch. **P@k / R@k / MRR** count a doc relevant only if its grade is `>=` the threshold (default 2.0 = highly relevant). **nDCG** uses the full graded scale regardless of threshold. |
+| **`relevance.py`** | `split_episodes`, `HeldOutQuery` (now carries `gold_tools` from the held-out episode), `build_queries`, `build_qrels`. **Graded relevance via tool-set Jaccard**: 2.0 if same task_type AND Jaccard ≥ 0.5; 1.0 if same type AND any tool overlap; 0.5 if same type only; 0.0 otherwise. Mode (`success`/`failure`) acts as a multiplier — episodes whose outcome contradicts the mode get their grade halved. This is what makes the IR scores differentiated rather than saturated. |
 | **`downstream.py`** | `aggregate(rollouts) -> DownstreamMetrics`: success rate, failure repetition rate (% of agent failures that re-used a tool set known to have failed before), and the tool-usage distribution. `kl_divergence(p, q)` with epsilon smoothing for tool-distribution-shift comparisons. |
 
 ### `experiments/`
@@ -455,6 +455,20 @@ data/
 9. **Results overwrite on every run.** `experiments/*` write into fixed
    paths under `results/`. There is no run-id namespacing. If you want
    to compare two configurations, copy the tables before re-running.
+
+10. **Saturated IR metrics = bad relevance judgments, not great
+    retrievers.** v0 of this repo had P@5 ≈ 1.0 across every
+    retriever — that wasn't success, it was a coarse `qrels` (every
+    same-task-type doc graded relevant) combined with a synthetic
+    generator that wrote the task_type literal into every state.
+    Both are now fixed: `build_qrels` grades by tool-set Jaccard with
+    the held-out episode's gold tools (graded 0.5/1.0/2.0), and the
+    synthetic templates omit the task_type token and inject ~18%
+    lexical distractors. With the harder data + stricter relevance,
+    P@5 lands in the 0.13–0.17 range and retrievers actually
+    differentiate. **If you ever see P@k ≈ 1.0 again, suspect the
+    relevance criterion before celebrating** — and remember
+    `evaluate(..., relevance_threshold=...)` lets you dial strictness.
 
 ---
 

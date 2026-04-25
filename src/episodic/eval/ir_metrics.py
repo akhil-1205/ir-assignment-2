@@ -62,10 +62,14 @@ def evaluate(
     results_by_query: dict[str, list[RetrievalResult]],
     qrels: dict[str, dict[str, float]],
     k_values: Iterable[int] = (1, 3, 5, 10),
+    relevance_threshold: float = 2.0,
 ) -> dict[str, float]:
     """Aggregate IR metrics over a query batch.
 
-    qrels[query_id] maps episode_id -> graded relevance (>=1 = relevant).
+    qrels[query_id] maps episode_id -> graded relevance.
+    P@k / R@k / MRR count a doc as "relevant" iff its grade is
+    >= ``relevance_threshold`` (default 2.0 = highly relevant).
+    nDCG uses the full graded scale regardless of threshold.
     """
     p_at: dict[int, list[float]] = {k: [] for k in k_values}
     r_at: dict[int, list[float]] = {k: [] for k in k_values}
@@ -74,7 +78,7 @@ def evaluate(
 
     for qid, results in results_by_query.items():
         rel_scores = qrels.get(qid, {})
-        relevant = {d for d, s in rel_scores.items() if s > 0}
+        relevant = {d for d, s in rel_scores.items() if s >= relevance_threshold}
         ids = _ids(results)
         for k in k_values:
             p_at[k].append(precision_at_k(ids, relevant, k))

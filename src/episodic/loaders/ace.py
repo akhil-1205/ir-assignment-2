@@ -110,45 +110,153 @@ def load_from_huggingface(max_records: int | None = None) -> list[Episode]:
     return []
 
 
-def _synthetic(n: int = 800, seed: int = 17) -> list[Episode]:
+_ACE_AFFINITY = {
+    "research": {"web_search", "summarizer"},
+    "coding": {"code_executor", "shell"},
+    "data_analysis": {"sql_query", "calculator"},
+    "scheduling": {"calendar"},
+    "debugging": {"shell", "code_executor"},
+    "qa": {"web_search", "summarizer"},
+    "extraction": {"file_reader", "api_call"},
+    "translation": {"translator"},
+}
+
+# Templates per task_type that DO NOT contain the task_type literal.
+# Each template has slots filled from a per-type entity pool, and
+# wording varies. Lexical overlap across types is intentional so BM25
+# alone cannot resolve task_type from the surface form.
+_ACE_TEMPLATES = {
+    "research": [
+        "Find recent material about {topic} and condense the key points.",
+        "Look up {topic} across reliable sources and write a short brief.",
+        "Pull together what is known about {topic} from the open web.",
+    ],
+    "coding": [
+        "Implement a function that {action} for inputs of {entity}.",
+        "Write code to {action} given {entity} as the structure.",
+        "Build a small program that handles {entity} and {action}.",
+    ],
+    "data_analysis": [
+        "Compute aggregate statistics over the {entity} table for {topic}.",
+        "Analyze trends in {entity} grouped by {topic}.",
+        "Run a query to summarize {topic} from the {entity} dataset.",
+    ],
+    "scheduling": [
+        "Set up a meeting on {topic} with the team next week.",
+        "Find a slot to discuss {topic} between {entity}.",
+        "Block off time for a recurring sync about {topic}.",
+    ],
+    "debugging": [
+        "Investigate why {entity} fails when {action}.",
+        "Trace the cause of the error in {entity} during {action}.",
+        "Reproduce the issue where {action} on {entity} returns wrong output.",
+    ],
+    "qa": [
+        "Answer the question: which {entity} is associated with {topic}?",
+        "Look up the answer to a query about {topic} involving {entity}.",
+        "Provide a short, sourced answer about {topic}.",
+    ],
+    "extraction": [
+        "Pull structured fields about {topic} out of the {entity} document.",
+        "Read the {entity} file and extract every reference to {topic}.",
+        "Parse {entity} and return a list of {topic} entries.",
+    ],
+    "translation": [
+        "Translate the passage about {topic} into another language.",
+        "Render the {entity} content into the target locale.",
+        "Convert the {topic} text from one language to another.",
+    ],
+}
+
+_ACE_ENTITIES = {
+    "research": ["renewables", "graph databases", "climate policy", "vector search",
+                 "supply chains", "rare earths", "robotics safety"],
+    "coding": ["a binary tree", "a CSV reader", "a rate limiter", "a hash map",
+               "a websocket client", "a retry loop"],
+    "data_analysis": ["sales", "users", "events", "orders", "logins", "transactions"],
+    "scheduling": ["the design review", "the quarterly plan", "onboarding",
+                   "the offsite", "code freeze"],
+    "debugging": ["the auth service", "the indexer", "the payment job",
+                  "the search ranker", "the cache layer"],
+    "qa": ["paper", "report", "manual", "spec", "ticket"],
+    "extraction": ["invoice", "contract PDF", "earnings statement",
+                   "transcript", "support email"],
+    "translation": ["product page", "research abstract", "release notes",
+                    "user manual", "blog post"],
+}
+
+_ACE_TOPICS = [
+    "latency", "Q3 results", "Paris", "Tokyo", "GPU usage", "billing",
+    "compliance", "throughput", "an outage", "an SLA breach", "deprecation",
+    "a migration", "a refactor", "feature flags",
+]
+
+_ACE_ACTIONS = [
+    "deduplicates entries", "validates input", "merges streams",
+    "renders the result", "ranks candidates", "logs structured events",
+    "retries with backoff", "reads a partial file",
+]
+
+
+def _synthetic(n: int = 800, seed: int = 17, distractor_frac: float = 0.18) -> list[Episode]:
+    """Harder synthetic ACE.
+
+    Changes vs. v0:
+      - state_text never contains the task_type literal
+      - per-type templates + entity/topic/action pools produce lexical variation
+      - ~18% of episodes are *distractors*: state borrowed from one task_type
+        but labeled (and tooled) for a different one. Lexically similar but
+        actually irrelevant — BM25 will rank them up; better retrievers
+        should not.
+      - tool sets vary widely within a task_type so tool-Jaccard relevance
+        is meaningful.
+    """
     rng = random.Random(seed)
     out: list[Episode] = []
     for i in range(n):
-        task_type = rng.choice(_ACE_TASK_TYPES)
+        is_distractor = rng.random() < distractor_frac
+        true_type = rng.choice(_ACE_TASK_TYPES)
+        text_type = rng.choice([t for t in _ACE_TASK_TYPES if t != true_type]) if is_distractor else true_type
+
+        template = rng.choice(_ACE_TEMPLATES[text_type])
+        state = template.format(
+            topic=rng.choice(_ACE_TOPICS),
+            entity=rng.choice(_ACE_ENTITIES[text_type]),
+            action=rng.choice(_ACE_ACTIONS),
+        )
+
+        # Tool set: 60% from affinity, 40% random — within the TRUE type
+        affinity = _ACE_AFFINITY[true_type]
         n_tools = rng.randint(1, 4)
-        tools = rng.sample(_ACE_TOOLS, k=n_tools)
-        # success probability depends on tool/task affinity
-        affinity = {
-            "research": {"web_search", "summarizer"},
-            "coding": {"code_executor", "shell"},
-            "data_analysis": {"sql_query", "calculator"},
-            "scheduling": {"calendar"},
-            "debugging": {"shell", "code_executor"},
-            "qa": {"web_search", "summarizer"},
-            "extraction": {"file_reader", "api_call"},
-            "translation": {"translator"},
-        }[task_type]
-        success = bool(set(tools) & affinity) and rng.random() > 0.15
+        tools: list[str] = []
+        if rng.random() < 0.7 and affinity:
+            tools.append(rng.choice(list(affinity)))
+        while len(tools) < n_tools:
+            t = rng.choice(_ACE_TOOLS)
+            if t not in tools:
+                tools.append(t)
+
+        success = bool(set(tools) & affinity) and rng.random() > 0.2
         outcome = "success" if success else "failure"
-        state = f"Task: {task_type} job number {i}. Need to handle {task_type} use case."
-        plan = f"Use {', '.join(tools)} to address the {task_type} request step by step."
+        plan = f"Run {tools[0]} first; chain {', '.join(tools[1:]) or 'no further tools'}; verify output."
         outcome_text = (
-            f"Completed {task_type} successfully using {tools[0]}."
+            f"Returned a usable result via {tools[0]}."
             if success
-            else f"Failed {task_type}: tool {tools[0]} returned an error."
+            else f"{tools[0]} produced an error or wrong output; retry needed."
         )
-        ep = Episode(
-            episode_id=f"ace-syn-{i:06d}",
-            state_text=state,
-            plan_text=plan,
-            tools_used=tools,
-            outcome_label=outcome,  # type: ignore[arg-type]
-            outcome_text=outcome_text,
-            timestamp=time.time() - (n - i) * 3600.0,
-            source="ace",
-            task_type=task_type,
+        out.append(
+            Episode(
+                episode_id=f"ace-syn-{i:06d}",
+                state_text=state,
+                plan_text=plan,
+                tools_used=tools,
+                outcome_label=outcome,  # type: ignore[arg-type]
+                outcome_text=outcome_text,
+                timestamp=time.time() - (n - i) * 3600.0,
+                source="ace",
+                task_type=true_type,
+            )
         )
-        out.append(ep)
     return out
 
 

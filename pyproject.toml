@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "episodic-ir"
+version = "0.1.0"
+description = "Episodic memory retrieval system for adaptive agent planning"
+requires-python = ">=3.10"
+dependencies = [
+    "rank-bm25>=0.2.2",
+    "sentence-transformers>=2.7.0",
+    "faiss-cpu>=1.7.4",
+    "datasets>=2.18.0",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pandas>=2.1",
+    "matplotlib>=3.8",
+    "nltk>=3.8",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-xdist>=3.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["episodic*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

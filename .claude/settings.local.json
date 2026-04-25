@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import rank_bm25, numpy, pytest; print\\('ok'\\)\")",
+      "Bash(python -c \"import numpy; print\\('numpy', numpy.__version__\\)\")",
+      "Bash(python -c \"import pytest; print\\('pytest', pytest.__version__\\)\")",
+      "Bash(python -c \"import faiss; print\\('faiss', faiss.__version__\\)\")",
+      "Bash(python -c \"import sentence_transformers; print\\('st', sentence_transformers.__version__\\)\")",
+      "Bash(python -c \"import pandas; print\\('pandas', pandas.__version__\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(pip install *)"
+    ]
+  }
+}

@@ -17,8 +17,11 @@ Everything in this repo serves one of three roles:
 
 1. **Build** an episodic-memory corpus (state, plan, tools, outcome) from
    public datasets (ACE, MSC).
-2. **Retrieve** relevant past episodes using four strategies (BM25, dense,
-   hybrid, field-aware), with optional success/failure filtering and
+2. **Retrieve** relevant past episodes using **eight strategies** (BM25,
+   dense state, dense state+plan, hybrid, field-aware, knowledge-graph
+   PPR, cross-encoder rerank over a hybrid first stage, and a five-stage
+   Graph-Augmented Multi-Signal Reranker that fuses RRF + CE + KG
+   features + MMR), with optional success/failure filtering and
    heuristic re-ranking.
 3. **Evaluate** retrieval with IR metrics (P@k, R@k, MRR, nDCG) and with
    downstream metrics on a simulated agent (success rate, failure
@@ -54,6 +57,7 @@ Everything in this repo serves one of three roles:
                                 │   │ DenseIndex state │   │
                                 │   │ DenseIndex s+p   │   │
                                 │   │ DenseIndex plan  │   │
+                                │   │ KGIndex (graph)  │   │
                                 │   │ MetadataStore    │   │
                                 │   └──────────────────┘   │
                                 └────────────┬────────────┘
@@ -64,6 +68,13 @@ Everything in this repo serves one of three roles:
                               │   DenseRetriever              │
                               │   HybridRetriever             │
                               │   FieldAwareRetriever         │
+                              │   KGRetriever (PPR walks)     │
+                              │   CrossEncoderReranker        │
+                              │     (two-stage; wraps a       │
+                              │      first-stage Retriever)   │
+                              │   GraphAugmentedReranker      │
+                              │     (5-stage: RRF→CE→graph    │
+                              │      features→fuse→MMR)       │
                               │   + filter_outcome=success/   │
                               │     failure                   │
                               └──────────────┬───────────────┘
@@ -97,7 +108,7 @@ Everything in this repo serves one of three roles:
 
 | # | Question | What varies | Output |
 |---|----------|-------------|--------|
-| 1 | Which retrieval method is best? | retriever | `exp1_methods.csv` |
+| 1 | Which retrieval method is best? | retriever (BM25 / dense / dense+plan / hybrid / field-aware / **KG-PPR** / **CE-rerank** / **GAR**) | `exp1_methods.csv` |
 | 2 | Which document representation is best? | embedded text (state / state+plan / full) | `exp2_representation.csv` |
 | 3 | Should we retrieve successes, failures, or both? | filter mode | `exp3_*.csv` (IR + downstream) |
 | 4 | How sensitive is retrieval to k? | k ∈ {1,3,5,10} | `exp4_topk.csv` |
@@ -159,15 +170,19 @@ ir-assignment-2/
 │   │   ├── tokenize.py        # shared tokenizer (regex + NLTK stopwords)
 │   │   ├── bm25_index.py      # rank_bm25 wrapper, pickled to disk
 │   │   ├── dense_index.py     # FAISS IndexFlatIP over MiniLM embeddings
+│   │   ├── kg_index.py        # heterogeneous graph + sparse adjacency, PPR
 │   │   └── metadata_store.py  # episode_id → Episode, plus outcome filter
 │   │
-│   ├── retrieval/             # 4 retrieval strategies + Retriever protocol
+│   ├── retrieval/             # 8 retrieval strategies + Retriever protocol
 │   │   ├── __init__.py        # lazy re-exports (avoids eager rank_bm25/faiss imports)
 │   │   ├── base.py            # Retriever Protocol, RetrievalResult, outcome filter
 │   │   ├── bm25.py            # BM25Retriever
 │   │   ├── dense.py           # DenseRetriever (state OR state+plan)
 │   │   ├── hybrid.py          # alpha * BM25_norm + (1-alpha) * cos_norm
-│   │   └── field_aware.py     # weighted state+plan+tools+outcome scoring
+│   │   ├── field_aware.py     # weighted state+plan+tools+outcome scoring
+│   │   ├── kg.py              # KGRetriever — Personalized PageRank with restart
+│   │   ├── cross_encoder.py   # CrossEncoderReranker — two-stage retrieve+rerank
+│   │   └── graph_augmented.py # GraphAugmentedReranker — 5-stage RRF+CE+KG+MMR
 │   │
 │   ├── rerank/                # composable re-ranking heuristics
 │   │   ├── __init__.py
@@ -259,6 +274,7 @@ ir-assignment-2/
 | **`tokenize.py`** | `tokenize(text)` returns lowercased word tokens minus stopwords. NLTK stopwords with built-in fallback so first-run failures (no NLTK download) still work. Cached via `lru_cache`. |
 | **`bm25_index.py`** | `BM25Index.build(episodes, field=...)` builds an in-memory `BM25Okapi` over tokenized documents and remembers the parallel list of episode IDs. `search(query, k)` returns `(episode_id, score)` pairs. `save/load` use pickle. |
 | **`dense_index.py`** | `Encoder` lazily wraps `SentenceTransformer('all-MiniLM-L6-v2')`. `DenseIndex.build(episodes, field)` encodes the chosen field (`"state"` / `"state_plan"` / `"full_document"`), L2-normalizes, and stuffs into `faiss.IndexFlatIP` (inner product over normalized vectors == cosine). `save/load` round-trip both the FAISS index and the `(ids, embeddings, field, model)` tuple via `numpy.savez`. |
+| **`kg_index.py`** | Heterogeneous undirected graph: `episode`, `tool`, `tasktype`, `outcome`, `entity` nodes connected by weighted edges (entity edges are idf-weighted). Stored as a single row-normalized `scipy.sparse.csr_matrix` (the transition matrix for PPR). `KGIndex.build(episodes)` extracts an entity vocab from content tokens (df ≥ 2, len ≥ 4), assembles all edges, and row-normalizes. `search(query, k)` runs **Personalized PageRank with restart**: seeds the personalization vector with idf-weighted entity nodes plus tool-vocab keyword hits from the query, iterates `r = (1-α)p + α·Aᵀr` until convergence, and returns the top-k episode nodes by stationary mass. `restrict_to_episodes(train_ids)` rebuilds the graph dropping held-out episode nodes — used by `_common.load_setup` for clean held-out eval. |
 | **`metadata_store.py`** | Tiny `dict[str, Episode]` wrapper. Provides `get(id)`, `all_episodes()`, `filter_outcome(label)`, JSON I/O. Used by every retriever to turn an `episode_id` back into a full `Episode`. |
 
 ### `src/episodic/retrieval/`
@@ -271,6 +287,9 @@ ir-assignment-2/
 | **`dense.py`** | Thin wrapper over `DenseIndex.search`; the same class serves both `state` and `state+plan` variants by holding a different `DenseIndex`. |
 | **`hybrid.py`** | Runs BM25 and dense over `k * recall_multiplier` candidates each, **min-max normalizes both score lists to [0,1]** so they're comparable, combines as `alpha * bm25_norm + (1-alpha) * cos_norm` over the union, sorts, applies outcome filter. |
 | **`field_aware.py`** | Recall pool from BM25 ∪ dense-state. Re-scores each candidate with a weighted sum of: cos(query, episode.state), cos(query, episode.plan), Jaccard tool overlap (query tools extracted by keyword match against the known vocab), and outcome match. Weights are a `FieldWeights` dataclass — defaults `(0.5, 0.2, 0.2, 0.1)`. |
+| **`kg.py`** | `KGRetriever` over a `KGIndex`. Runs Personalized PageRank with restart, then optionally filters by outcome on an oversampled pool. The PPR teleport probability `alpha` (default 0.85) is the only tunable. |
+| **`cross_encoder.py`** | `CrossEncoderReranker` — two-stage retrieve-then-rerank. Wraps any first-stage `Retriever` (typically `HybridRetriever`), pulls a candidate pool of `rerank_pool` (default 30), and re-scores each `(query, episode.full_document)` pair with a transformer cross-encoder (default `cross-encoder/ms-marco-MiniLM-L-6-v2`, ~80 MB, downloaded on first use). Outcome filtering is applied **after** rerank so the strongest matching candidates rise to the top. The cross-encoder is the standard upgrade over a bi-encoder: query and doc go through attention together, so subtle relevance signals survive. Tests use a `score_fn=` callable to inject a deterministic scorer without downloading the real model. |
+| **`graph_augmented.py`** | `GraphAugmentedReranker` (GAR) — the most complex method, currently top of the leaderboard on nDCG@5. Five stages: (1) **Reciprocal Rank Fusion** over a list of diverse first-stage retrievers (typically `[BM25Retriever, DenseRetriever, KGRetriever]`) — combines ranks without needing comparable score scales; (2) **Cross-encoder** scores each `(query, episode.full_doc)` pair on the union pool; (3) **KG features** per candidate — PPR mass under the same query seeds (centrality) plus query-vs-episode tool Jaccard (symbolic match); (4) **min-max normalized weighted fusion** of CE / PPR / tool / RRF signals (defaults `0.65 / 0.20 / 0.10 / 0.05` — CE-dominant with the others as tiebreakers); (5) **MMR diversification** over dense embeddings (default `λ=1.0` = pure relevance; lower to diversify top-k). Outcome filter applied between stages 4 and 5 so MMR picks among already-correct candidates. Tests inject a stub `score_fn` to avoid the cross-encoder download. |
 
 ### `src/episodic/rerank/`
 
@@ -307,7 +326,7 @@ load setup → build retrievers → call `evaluate_retriever` → write CSV + ba
 |------|-------------|
 | **`__init__.py`** | Marker; lets `runpy.run_path` resolve module-relative imports cleanly. |
 | **`_common.py`** | The boring plumbing. Bootstraps `src/` onto `sys.path` so scripts run without `pip install -e .`. `load_setup()` returns a `Setup` dataclass holding the train/held-out split, queries, qrels, metadata store, BM25 index, three dense indices, encoder, and tool vocab. **Always restricts indices to train at eval time** — when saved indices exist, rebuilds BM25 over train tokens and subsets saved FAISS embeddings by train IDs (no re-encoding). When indices are missing, builds everything in-memory from scratch. Helpers: `evaluate_retriever`, `write_table`, `save_bar_plot` (matplotlib Agg backend → PNG). |
-| **`exp1_methods.py`** | Compares BM25, dense (state), dense (state+plan), hybrid, field-aware. Writes `results/tables/exp1_methods.csv` and `results/figures/exp1_methods_ndcg5.png`. |
+| **`exp1_methods.py`** | Compares BM25, dense (state), dense (state+plan), hybrid, field-aware, KG-PPR, CE-rerank(hybrid), and GAR. Writes `results/tables/exp1_methods.csv` and `results/figures/exp1_methods_ndcg5.png`. |
 | **`exp2_representation.py`** | Holds retriever fixed (dense), varies the embedded text (state / state+plan / full_document — the last one is built ad-hoc since `state` and `state+plan` are pre-loaded). |
 | **`exp3_success_failure.py`** | Two halves. **IR side:** evaluates hybrid retrieval under three modes (`success`, `failure`, `any`) using mode-aware qrels. **Downstream side:** runs the simulated agent four ways (no retrieval / success-only / failure-only / both) and reports success rate, failure repetition, and tool-distribution KL vs. the no-retrieval baseline. |
 | **`exp4_topk.py`** | Sweeps `k ∈ {1, 3, 5, 10}` using the hybrid retriever. Plots nDCG@k curve. |
@@ -331,9 +350,12 @@ load setup → build retrievers → call `evaluate_retriever` → write CSV + ba
 | **`test_bm25.py`** | BM25 ranks the term-overlapping document first; the outcome filter on `BM25Retriever` returns only documents matching the requested label. |
 | **`test_dense.py`** | Dense retriever with a deterministic 1-hot stub encoder (no network, no model download) — covers token-match retrieval and outcome filtering with a 10× oversample. Skips cleanly if `faiss` is missing. |
 | **`test_hybrid.py`** | Hybrid finds term-overlapping doc; verifies `α=1.0` ≡ BM25-only and `α=0.0` ≡ dense-only on the same query. |
+| **`test_kg.py`** | KG builds the expected node types (episode/tool/tasktype/outcome/entity); PPR search surfaces the right episode for an entity-overlapping query; outcome filter works; empty-query returns `[]`; `restrict_to_episodes` properly drops held-out nodes. |
+| **`test_cross_encoder.py`** | Reranker promotes the more-overlapping doc using a stub `score_fn` (no model download); outcome filter survives reranking; empty first-stage yields empty result. |
+| **`test_graph_augmented.py`** | GAR runs end-to-end with stubbed CE; top-k contains the relevant cluster; outcome filter narrows to failures only; empty query → empty result; MMR with `λ=0` exercises the diversification path. |
 | **`test_agent.py`** | Tool-bias amplifies success-tool probability (and renormalizes); `SimulatedAgent` runs without a retriever and picks tools from the vocabulary. |
 
-`pytest -q` → **15 passed**.
+`pytest -q` → **27 passed**.
 
 ### `results/`
 
@@ -381,6 +403,12 @@ data/
 | If you want to… | Edit this | Notes |
 |-----------------|-----------|-------|
 | Add a new retrieval strategy | New file in `src/episodic/retrieval/`, implement `Retriever` protocol from `base.py`. | Add a lazy import in `retrieval/__init__.py` and a row in `experiments/exp1_methods.py`. |
+| Add a new graph relation to the KG | Edit `kg_index.py::KGIndex.build` — add the new node type and edges. | The PPR loop is agnostic to schema; just make sure new edges have sensible weights (entities use idf so rare = stronger). |
+| Try a different cross-encoder | Pass `model_name=` to `CrossEncoderReranker` (or change `DEFAULT_CE_MODEL`). | Larger CE models trade quality for latency. The default ms-marco MiniLM is the smallest one with strong relevance training. |
+| Use the cross-encoder over a different first stage | Pass any `Retriever` as `first_stage=` (e.g. `KGRetriever`, `BM25Retriever`). | First-stage diversity matters — a hybrid first stage gives the CE the best candidate pool. |
+| Tune GAR's signal mix | Edit `weight_ce / weight_ppr / weight_tool / weight_rrf` on `GraphAugmentedReranker`. | Defaults are CE-dominant (0.65) with PPR as the strongest auxiliary (0.20). Increase `weight_ppr` if your KG has rich entity coverage; raise `weight_rrf` if first-stage retrievers disagree a lot (high RRF disagreement = useful first-stage diversity signal). |
+| Diversify GAR's top-k | Lower `mmr_lambda` (default 1.0 = pure relevance). | Useful when redundant top-k hurts user value (e.g., agent prompts where you want varied examples). Hurts our current nDCG because qrels reward multiple same-grade docs — but real downstream evals may prefer diverse memories. |
+| Add a new first-stage retriever to GAR | Append your retriever to the `first_stages` list passed to `GraphAugmentedReranker`. | RRF combines ranks, so any retriever implementing the protocol just slots in. Test with `score_fn=` to skip the CE download. |
 | Try a different embedding model | Pass `Encoder(model_name=...)` into `DenseIndex.build` (or via `--model` flag in `build_indices.py`). | The model name is persisted into the saved npz so `DenseIndex.load` recreates the right encoder. |
 | Add a re-ranker | New function in `rerank/heuristics.py`, add a flag to `RerankConfig`, wire into `apply_rerank`. | Or implement LTR by filling out `rerank/ltr.py`. |
 | Change the relevance rule | `eval/relevance.py::build_qrels`. | Be careful — every IR metric depends on this; rerun all experiments. |
@@ -470,6 +498,34 @@ data/
     relevance criterion before celebrating** — and remember
     `evaluate(..., relevance_threshold=...)` lets you dial strictness.
 
+11. **Cross-encoder is N× slower than the bi-encoder.** Each query
+    triggers `rerank_pool` model calls (default 30) instead of a
+    single embedding lookup. On CPU expect ~50-100ms per query for
+    the default ms-marco MiniLM — ~10s on 120 queries. Don't put a
+    cross-encoder on the first stage; always retrieve cheaply, then
+    rerank a small pool. If you need lower latency, drop
+    `rerank_pool` to ~10 (slight nDCG cost) or switch to a smaller
+    distilled CE.
+
+12. **KG-PPR returns `[]` if no query token hits the entity vocab
+    or tool vocab.** Personalization vector is zero → no mass to
+    propagate. This is correct semantics (we have no signal) but it
+    means short or vocabulary-mismatched queries silently drop. If
+    you see KG underperforming, dump `_personalization(query)` and
+    check whether seeds are landing.
+
+13. **GAR's MMR can hurt nDCG on graded relevance.** Our qrels
+    grade *multiple* docs as highly-relevant whenever they share a
+    task type and have tool overlap with the gold tools, so retrieving
+    several similar high-grade docs is rewarded. MMR's diversification
+    pushes those docs apart, giving a slot to a lower-grade
+    "different" doc — which can lose ~0.005 nDCG@5 in our setup.
+    Default is therefore `mmr_lambda=1.0` (no diversification).
+    The diversification machinery is still present and tested — flip
+    `mmr_lambda` lower when you actually want diverse top-k, e.g. for
+    LLM-prompt construction where varied examples beat redundant
+    ones.
+
 ---
 
 ## 7. Suggested next steps (v2 ideas)
@@ -479,8 +535,10 @@ data/
   doesn't need to change.
 - Implement `rerank/ltr.py` — the feature shape is documented; train on
   qrels-derived labels.
-- Add a cross-encoder reranker (e.g. `ms-marco-MiniLM-L-6-v2`) as a
-  third stage after hybrid recall.
+- Reciprocal Rank Fusion combining BM25 + dense + KG ranks (no score
+  normalization needed — uses ranks). Often competitive with rerank.
+- Try a CE-rerank over `KGRetriever` as the first stage (instead of
+  hybrid). KG already wins nDCG; CE on top might compound.
 - Stream memory updates: let new agent rollouts append to the index
   online so the retrieval distribution evolves during the rollout
   (currently the corpus is static).
@@ -493,13 +551,22 @@ data/
 
 ## 8. One-paragraph TL;DR
 
-`Episode` objects flow from `loaders/` into JSONL, get indexed three ways
-(BM25, dense, plan-dense), and are queried by four retrievers behind a
-shared `Retriever` protocol. A held-out split + graded qrels in
-`eval/relevance.py` feeds `eval/ir_metrics.py` for IR scores. A
-deterministic `SimulatedAgent` consumes retrieved successes/failures
-through `agent/tool_bias.py` and `eval/downstream.py` reports
-success-rate / failure-repetition / tool-KL. Five experiment scripts
-explore method, representation, success/failure, k, and weight choices,
-emitting CSVs and PNGs under `results/`. Tests cover schema, metrics,
-each retriever, and the agent — all green.
+`Episode` objects flow from `loaders/` into JSONL, get indexed four ways
+(BM25, dense, plan-dense, knowledge-graph adjacency), and are queried by
+**eight retrievers** behind a shared `Retriever` protocol — BM25, dense
+(state and state+plan variants), hybrid (alpha-weighted score fusion),
+field-aware (weighted state+plan+tools+outcome), KG-PPR (Personalized
+PageRank with restart over a heterogeneous graph), CE-rerank
+(cross-encoder reranking over a hybrid first stage), and **GAR**
+(Graph-Augmented Multi-Signal Reranker — 5-stage pipeline that fuses
+RRF over diverse first stages, cross-encoder pairwise scoring, KG
+features, and optional MMR diversification). A held-out split plus
+tool-Jaccard-graded qrels in `eval/relevance.py` feeds
+`eval/ir_metrics.py` for P@k, R@k, MRR, nDCG. A deterministic
+`SimulatedAgent` consumes retrieved successes/failures through
+`agent/tool_bias.py` and `eval/downstream.py` reports success-rate /
+failure-repetition / tool-KL. Five experiment scripts explore method,
+representation, success/failure, k, and weight choices, emitting CSVs
+and PNGs under `results/`. On the v1 corpus **GAR leads nDCG@5
+(0.411)**, **CE-rerank leads MRR (0.328)**, BM25 holds top P@5
+(0.167). All 27 unit tests green.

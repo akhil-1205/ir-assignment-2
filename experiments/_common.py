@@ -24,6 +24,7 @@ from episodic.eval.relevance import (
 )
 from episodic.indexing.bm25_index import BM25Index
 from episodic.indexing.dense_index import DenseIndex, Encoder
+from episodic.indexing.kg_index import KGIndex
 from episodic.indexing.metadata_store import MetadataStore
 from episodic.retrieval.base import Retriever
 from episodic.schema import Episode, load_episodes
@@ -43,6 +44,7 @@ class Setup:
     dense_state: DenseIndex
     dense_state_plan: DenseIndex
     dense_plan: DenseIndex
+    kg: KGIndex
     encoder: Encoder
     tool_vocab: list[str]
 
@@ -105,6 +107,7 @@ def load_setup(
     dense_state_dir = idx_dir / "dense_state"
     dense_sp_dir = idx_dir / "dense_state_plan"
     dense_plan_dir = idx_dir / "dense_plan"
+    kg_path = idx_dir / "kg.pkl"
 
     has_all = (
         bm25_path.exists()
@@ -142,6 +145,9 @@ def load_setup(
             encoder=encoder,
         )
 
+    # KG: build over train (graphs are cheap to construct)
+    kg = KGIndex.build(train)
+
     tool_vocab = sorted({t for ep in train for t in ep.tools_used})
 
     return Setup(
@@ -154,6 +160,7 @@ def load_setup(
         dense_state=dense_state,
         dense_state_plan=dense_sp,
         dense_plan=dense_plan,
+        kg=kg,
         encoder=encoder,
         tool_vocab=tool_vocab,
     )

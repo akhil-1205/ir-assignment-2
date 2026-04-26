@@ -18,6 +18,7 @@ if str(_SRC) not in sys.path:
 
 from episodic.indexing.bm25_index import BM25Index
 from episodic.indexing.dense_index import DenseIndex, Encoder
+from episodic.indexing.kg_index import KGIndex
 from episodic.schema import load_episodes
 
 
@@ -74,6 +75,14 @@ def main() -> None:
         model=np.array([encoder.model_name], dtype=object),
     )
     print(f"[dense] plan -> {plan_dir}")
+
+    print("[kg] building knowledge graph ...")
+    kg = KGIndex.build(episodes)
+    kg.save(out / "kg.pkl")
+    print(f"[kg] saved -> {out/'kg.pkl'} "
+          f"(nodes={len(kg.idx_to_node)}, "
+          f"entities={len(kg.entity_idf)}, "
+          f"tools={len(kg.tool_vocab)})")
 
     print("done.")
 

@@ -36,5 +36,6 @@ python experiments/run_all.py
 - BM25: `rank_bm25`
 - Embeddings: `sentence-transformers/all-MiniLM-L6-v2`
 - Dense index: FAISS (CPU)
+- Knowledge graph: `scipy.sparse` adjacency + Personalized PageRank
 - Datasets: ACE episodic + MSC via HuggingFace `datasets`
 - Agent: simulated rule-based policy

@@ -29,4 +29,13 @@ def __getattr__(name):
     if name == "FieldAwareRetriever":
         from .field_aware import FieldAwareRetriever
         return FieldAwareRetriever
+    if name == "KGRetriever":
+        from .kg import KGRetriever
+        return KGRetriever
+    if name == "CrossEncoderReranker":
+        from .cross_encoder import CrossEncoderReranker
+        return CrossEncoderReranker
+    if name == "GraphAugmentedReranker":
+        from .graph_augmented import GraphAugmentedReranker
+        return GraphAugmentedReranker
     raise AttributeError(name)

@@ -7,9 +7,12 @@ import argparse
 from _common import evaluate_retriever, load_setup, save_bar_plot, write_table
 from episodic.retrieval import (
     BM25Retriever,
+    CrossEncoderReranker,
     DenseRetriever,
     FieldAwareRetriever,
+    GraphAugmentedReranker,
     HybridRetriever,
+    KGRetriever,
 )
 
 
@@ -24,13 +27,27 @@ def main() -> None:
     queries = s.queries[:30] if args.quick else s.queries
     print(f"running exp1 on {len(queries)} queries")
 
+    hybrid = HybridRetriever(s.bm25, s.dense_state, s.store, alpha=0.5)
+    bm25_r = BM25Retriever(s.bm25, s.store)
+    dense_r = DenseRetriever(s.dense_state, s.store, name="dense-state")
+    kg_r = KGRetriever(s.kg, s.store, alpha=0.85, name="kg-ppr")
     retrievers = [
-        BM25Retriever(s.bm25, s.store),
-        DenseRetriever(s.dense_state, s.store, name="dense-state"),
+        bm25_r,
+        dense_r,
         DenseRetriever(s.dense_state_plan, s.store, name="dense-state-plan"),
-        HybridRetriever(s.bm25, s.dense_state, s.store, alpha=0.5),
+        hybrid,
         FieldAwareRetriever(s.bm25, s.dense_state, s.dense_plan, s.store,
                             tool_vocab=s.tool_vocab),
+        kg_r,
+        CrossEncoderReranker(first_stage=hybrid, rerank_pool=30,
+                             name="ce-rerank(hybrid)"),
+        GraphAugmentedReranker(
+            first_stages=[bm25_r, dense_r, kg_r],
+            kg_index=s.kg,
+            store=s.store,
+            dense_index_for_mmr=s.dense_state,
+            name="graph-augmented",
+        ),
     ]
 
     rows = []

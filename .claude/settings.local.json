@@ -15,7 +15,12 @@
       "Bash(PYTHONPATH=src python scripts/download_datasets.py)",
       "Bash(PYTHONPATH=src python scripts/build_indices.py)",
       "Bash(PYTHONPATH=src python -m pytest -q)",
-      "Bash(PYTHONPATH=src python experiments/exp1_methods.py)"
+      "Bash(PYTHONPATH=src python experiments/exp1_methods.py)",
+      "PowerShell(pandoc --version 2>&1)",
+      "PowerShell(head -1)",
+      "PowerShell(python -c \"import docx; print\\('python-docx available'\\)\" 2>&1)",
+      "PowerShell(pip install python-docx reportlab -q)",
+      "PowerShell(cd \"c:\\\\Users\\\\Akhil\\\\projects3\\\\ir-assignment-2\"; pip install comtypes -q 2>&1 | where-object {$_ -match \"Successfully\"} ; python docx_to_pdf.py)"
     ]
   }
 }
